@@ -58,6 +58,10 @@ except ImportError:
 import habana_frameworks.torch.core as htcore
 
 
+import towl.instrument as ti
+
+
+@ti.mark_func(title="gaudi_llama_rmsnorm_forward")
 def gaudi_llama_rmsnorm_forward(self, hidden_states):
     """
     Copied from LlamaRMSNorm.forward: https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
@@ -491,6 +495,7 @@ class GaudiLlamaAttention(LlamaAttention):
         self.k_cache.allocate(inp_seq_len, dtype, device, cache_shape)
         self.v_cache.allocate(inp_seq_len, dtype, device, cache_shape)
 
+    @ti.mark_func(title="GaudiLlamaAttention_update_sincos_cache")
     def update_sincos_cache(self, seq_len):
         # Call rotary emb forward() to update cos/sin cache when infering more than self.max_position_embeddings
         # This helps in avoiding creation of these caches during actual model forward pass and
@@ -499,10 +504,12 @@ class GaudiLlamaAttention(LlamaAttention):
             self.max_position_embeddings = seq_len
             _, _ = self.rotary_emb(self.get_k_proj_weight(), seq_len=seq_len)
 
+    @ti.mark_func(title="GaudiLlamaAttention_reorder")
     def reorder(self, tensor, beam_idx, dim_a, dim_b):
         updated = tensor.index_select(0, beam_idx)
         tensor.copy_(updated)
 
+    @ti.mark_func(title="GaudiLlamaAttention_reorder_kv_cache")
     def reorder_kv_cache(self, beam_idx: torch.LongTensor):
         if self.k_cache.cache is None:
             return (None, None)
@@ -513,6 +520,7 @@ class GaudiLlamaAttention(LlamaAttention):
         self.reorder(self.v_cache.cache, beam_idx, seq_length, head_dim)
         return (self.k_cache.cache.shape, self.v_cache.cache.shape)
 
+    @ti.mark_func(title="GaudiLlamaAttention_pre_attn_forward")
     def pre_attn_forward(
         self,
         hidden_states: torch.Tensor,
@@ -754,10 +762,12 @@ class GaudiLlamaAttention(LlamaAttention):
 
         return attn_output, attn_weights, past_key_value
 
+    @ti.mark_func(title="GaudiLlamaAttention_attention_all_reduce")
     def attention_all_reduce(self, attn_output):
         if hasattr(self.o_proj, "all_reduce"):
             self.o_proj.all_reduce(attn_output)
 
+    @ti.mark_func(title="GaudiLlamaAttention_post_attn_forward")
     def post_attn_forward(self, attn_output):
         if hasattr(self.o_proj, "post_all_reduce"):
             return self.o_proj.post_all_reduce(attn_output)
