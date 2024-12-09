@@ -973,9 +973,16 @@ class GaudiTrainer(Trainer):
                 if step % args.gradient_accumulation_steps == 0:
                     self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
 
-                # attn_softmax_bf16 and use_flash_attention is enabled only for llama, qwen2, starcoder2, gemma and baichuan
+                # attn_softmax_bf16 and use_flash_attention is enabled only for llama, qwen2, starcoder2, gemma, baichuan and chatglm
                 if hasattr(self.model, "generation_config") and self.model.generation_config is not None:
-                    if self.model.config.model_type in ["llama", "qwen2", "starcoder2", "gemma", "baichuan"]:
+                    if self.model.config.model_type in [
+                        "llama",
+                        "qwen2",
+                        "starcoder2",
+                        "gemma",
+                        "baichuan",
+                        "chatglm",
+                    ]:
                         if self.model.generation_config.attn_softmax_bf16:
                             inputs["attn_softmax_bf16"] = True
                         if self.model.generation_config.use_flash_attention:
@@ -986,7 +993,13 @@ class GaudiTrainer(Trainer):
                             inputs["flash_attention_causal_mask"] = True
                 if self.model.config is not None:
                     if self.model.config.model_type in ["llama", "qwen2", "mistral", "starcoder2"]:
-                        inputs["lazy_mode"] = args.use_lazy_mode
+                        if _is_peft_model(model):
+                            forward_method = getattr(model.get_base_model(), "forward")
+                        else:
+                            forward_method = getattr(model, "forward")
+                        signature = inspect.signature(forward_method)
+                        if "lazy_mode" in signature.parameters:
+                            inputs["lazy_mode"] = args.use_lazy_mode
                 # TODO: keep syncs for fast DDP?
                 with self.accelerator.accumulate(model):
                     tr_loss_step = self.training_step(model, inputs)
@@ -1960,9 +1973,9 @@ class GaudiTrainer(Trainer):
                 if batch_size is None:
                     batch_size = observed_batch_size
 
-            # attn_softmax_bf16 and use_flash_attention are enabled only for llama, qwen2, starcoder2, gemma and baichuan
+            # attn_softmax_bf16 and use_flash_attention are enabled only for llama, qwen2, starcoder2, gemma, baichuan and chatglm
             if hasattr(self.model, "generation_config") and self.model.generation_config is not None:
-                if self.model.config.model_type in ["llama", "qwen2", "starcoder2", "gemma", "baichuan"]:
+                if self.model.config.model_type in ["llama", "qwen2", "starcoder2", "gemma", "baichuan", "chatglm"]:
                     if self.model.generation_config.attn_softmax_bf16:
                         inputs["attn_softmax_bf16"] = True
                     if self.model.generation_config.use_flash_attention:
