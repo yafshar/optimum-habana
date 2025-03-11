@@ -43,8 +43,7 @@ from transformers.generation.utils import GenerationConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.utils import logging
 
-from optimum.habana.transformers.modeling_attn_mask_utils import _gaudi_prepare_4d_causal_attention_mask
-
+from ...modeling_attn_mask_utils import _gaudi_prepare_4d_causal_attention_mask
 from .configuration_baichuan import BaichuanConfig
 from .generation_utils import TextIterStreamer, build_chat_input
 
@@ -133,9 +132,9 @@ class KVCache(nn.Module):
             self.inp_seq_len = inp_seq_len
             self.cache = torch.zeros(shape, dtype=dtype, device=device)
         else:
-            assert (
-                self.inp_seq_len == inp_seq_len
-            ), f"inp_seq_len must be the same. self.inp_seq_len:{self.inp_seq_len} inp_seq_len:{inp_seq_len}"
+            assert self.inp_seq_len == inp_seq_len, (
+                f"inp_seq_len must be the same. self.inp_seq_len:{self.inp_seq_len} inp_seq_len:{inp_seq_len}"
+            )
             self.cache.fill_(0)
 
     def update(self, prev, cur, dim, idx, inp_seq_len):

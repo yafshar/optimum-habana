@@ -38,7 +38,6 @@ from optimum.habana.checkpoint_utils import (
 )
 from optimum.habana.utils import (
     check_habana_frameworks_version,
-    check_neural_compressor_min_version,
     check_optimum_habana_min_version,
     get_habana_frameworks_version,
     set_seed,
@@ -131,8 +130,8 @@ def setup_const_serialization(const_serialization_path):
 
 def setup_env(args):
     # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-    check_min_version("4.34.0")
-    check_optimum_habana_min_version("1.9.0.dev0")
+    check_min_version("4.45.0")
+    check_optimum_habana_min_version("1.17.0.dev0")
     # TODO: SW-167588 - WA for memory issue in hqt prep_model
     os.environ.setdefault("EXPERIMENTAL_WEIGHT_SHARING", "FALSE")
 
@@ -159,7 +158,7 @@ def setup_device(args):
     if args.device == "hpu":
         import habana_frameworks.torch.core as htcore
 
-        if args.quant_config:
+        if args.quant_config or args.load_quantized_model_with_inc or args.local_quantized_inc_model_path:
             htcore.hpu_set_env()
     return torch.device(args.device)
 
@@ -253,12 +252,19 @@ def setup_model(args, model_dtype, model_kwargs, logger):
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path, torch_dtype=model_dtype, quantization_config=quantization_config, **model_kwargs
         )
-    elif args.load_quantized_model_with_inc:
-        # TODO: This will be removed in v1.19 Synapse release
-        # Override neural_compressor _load_remaining_pretrained_weight for the Transformer 4.45 release.
-        import neural_compressor.torch.algorithms.weight_only.save_load as nc_sl
+    elif args.load_quantized_model_with_autoawq:
+        from transformers import AwqConfig
 
-        nc_sl.WOQModelLoader._load_remaining_pretrained_weight = local_load_remaining_pretrained_weight
+        quantization_config = AwqConfig(bits=4, version="hpu")
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path, torch_dtype=model_dtype, quantization_config=quantization_config, **model_kwargs
+        )
+    elif args.load_quantized_model_with_inc:
+        # TODO: This will be removed in v1.20 Synapse release
+        # Override neural_compressor split_rank_state_dict for loading neural_magic models on multi-cards.
+        import neural_compressor.torch.algorithms.fp8_quant.save_load as nc_sl
+
+        nc_sl.split_rank_state_dict = local_split_rank_state_dict
 
         from neural_compressor.torch.quantization import load
 
@@ -278,8 +284,6 @@ def setup_model(args, model_dtype, model_kwargs, logger):
             original_model=org_model,
             **model_kwargs,
         )
-        if not check_neural_compressor_min_version("3.2"):
-            model = model.to(model_kwargs["torch_dtype"])
     else:
         if args.assistant_model is not None:
             assistant_model = AutoModelForCausalLM.from_pretrained(
@@ -306,7 +310,8 @@ def setup_model(args, model_dtype, model_kwargs, logger):
         if check_habana_frameworks_version("1.13.0") and model.config.model_type == "falcon":
             model = wrap_in_hpu_graph(model, hash_with_views=False)
         else:
-            model = wrap_in_hpu_graph(model)
+            max_graphs = getattr(args, "max_graphs", None)
+            model = wrap_in_hpu_graph(model, max_graphs=max_graphs)
         if args.assistant_model is not None:
             assistant_model = wrap_in_hpu_graph(assistant_model)
         if _is_peft_model(model):
@@ -316,6 +321,9 @@ def setup_model(args, model_dtype, model_kwargs, logger):
 
     if args.torch_compile:
         model = get_torch_compiled_model(model, logger)
+        assert "PT_HPU_LAZY_MODE" in os.environ and os.environ["PT_HPU_LAZY_MODE"] == "0", (
+            "Please set PT_HPU_LAZY_MODE=0 on command line when using `--torch_compile`"
+        )
         # if args.assistant_model is not None:
         #     assistant_model = get_torch_compiled_model(assistant_model, logger)
     return model, assistant_model
@@ -441,6 +449,13 @@ def setup_distributed_model(args, model_dtype, model_kwargs, logger):
     if load_to_meta:
         # Construct model with fake meta tensors, later will be replaced on devices during ds-inference ckpt load
         with deepspeed.OnDevice(dtype=model_dtype, device="meta"):
+            if (
+                hasattr(config, "rope_scaling")
+                and config.rope_scaling
+                and config.rope_scaling["rope_type"] == "llama3"
+                and config.max_position_embeddings > 8192
+            ):
+                config.max_position_embeddings = 8192
             model = AutoModelForCausalLM.from_config(config, torch_dtype=model_dtype)
 
         # Model loaded to meta is managed differently
@@ -612,6 +627,12 @@ def setup_tokenizer(args, model, assistant_model, logger):
         )
         model.generation_config.eos_token_id = model.generation_config.eos_token_id[-1]
 
+    if model.config.model_type == "mpt":
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        if model.generation_config.pad_token_id is None:
+            model.generation_config.pad_token_id = tokenizer.eos_token_id
+
     # Some models like GPT2 do not have a PAD token so we have to set it if necessary
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -649,6 +670,7 @@ def setup_generation_config(args, model, assistant_model, tokenizer):
     generation_config.trim_logits = args.trim_logits
     generation_config.attn_softmax_bf16 = args.attn_softmax_bf16
     generation_config.limit_hpu_graphs = args.limit_hpu_graphs
+    generation_config.clear_hpu_graphs_cache = args.clear_hpu_graphs_cache
     generation_config.reuse_cache = args.reuse_cache
     generation_config.reduce_recompile = args.reduce_recompile
     if generation_config.reduce_recompile:
@@ -659,6 +681,7 @@ def setup_generation_config(args, model, assistant_model, tokenizer):
     generation_config.flash_attention_fast_softmax = args.flash_attention_fast_softmax
     generation_config.trust_remote_code = args.trust_remote_code
     generation_config.valid_sequence_lengths = None
+    generation_config.attn_batch_split = args.attn_batch_split
 
     return generation_config
 
@@ -669,7 +692,7 @@ def exclude_hpu_graph_configs(args):
         if "falcon-180B" in args.model_name_or_path or "falcon-180b" in args.model_name_or_path:
             return False
         if args.world_size == 2 or args.world_size == 4 or args.world_size == 8:
-            if args.quant_config:
+            if args.quant_config or args.load_quantized_model_with_inc or args.local_quantized_inc_model_path:
                 if args.max_input_tokens >= 8192 and args.max_new_tokens >= 128:
                     return False
             else:
@@ -683,6 +706,9 @@ def exclude_hpu_graph_configs(args):
 def initialize_model(args, logger):
     init_start = time.perf_counter()
     setup_distributed(args)
+    if not args.world_size > 0 and args.attn_batch_split > 1:
+        logger.warning("Disabling attention batch splitting as it's unnecessary for single-card execution")
+        args.attn_batch_split = 1
     if exclude_hpu_graph_configs(args):
         args.limit_hpu_graphs = False
     override_prints(args.global_rank == 0 or args.verbose_workers, logger)
@@ -712,7 +738,7 @@ def initialize_model(args, logger):
 
     model, assistant_model = (
         setup_model(args, model_dtype, model_kwargs, logger)
-        if not use_deepspeed
+        if not use_deepspeed or args.load_quantized_model_with_inc
         else setup_distributed_model(args, model_dtype, model_kwargs, logger)
         if args.parallel_strategy == "none"
         else setup_distributed_model_tp(args, model_dtype, model_kwargs, logger, cache_dir)
@@ -725,7 +751,7 @@ def initialize_model(args, logger):
 
     if args.const_serialization_path:
         setup_const_serialization(args.const_serialization_path)
-    if args.quant_config:
+    if args.quant_config or args.load_quantized_model_with_inc or args.local_quantized_inc_model_path:
         model = setup_inference(args, model)
     init_end = time.perf_counter()
     logger.info(f"Args: {args}")
@@ -734,45 +760,39 @@ def initialize_model(args, logger):
     return model, assistant_model, tokenizer, generation_config
 
 
-# TODO:This will be removed from Synapse v1.19 release.
-# This is to override _load_remaining_pretrained_weight for Transformer 4.45 release.
-def local_load_remaining_pretrained_weight(self, model):
-    from transformers.modeling_utils import _load_state_dict_into_meta_model, load_state_dict
+def save_model(model, tokenizer, save_path):
+    """Saves the model and tokenizer in the huggingface format with neural_compressor."""
+    from neural_compressor.torch.quantization import save
 
-    resolved_archive_file = self.kwargs.pop("resolved_archive_file", None)
-    torch_dtype = self.kwargs.pop("torch_dtype", torch.float32)
-    dtype_orig = self.kwargs.pop("dtype_orig", None)
-    offload_folder = self.kwargs.pop("offload_folder", None)
-    offload_state_dict = self.kwargs.pop("offload_state_dict", False)
+    save(model, save_path, format="huggingface")
+    tokenizer.save_pretrained(save_path)
 
-    # restore default dtype
-    if dtype_orig is not None:
-        torch.set_default_dtype(dtype_orig)
 
-    if not isinstance(resolved_archive_file, list):
-        resolved_archive_file = [resolved_archive_file]
-    for shard_file in resolved_archive_file:
-        state_dict = load_state_dict(shard_file)
+# TODO: This will be removed in v1.20 Synapse release
+# Override neural_compressor split_rank_state_dict for loading neural_magic models on multi-cards.
+def local_split_rank_state_dict(model, gathered_state_dict):
+    """split state_dict for current local_rank."""
+    from neural_compressor.torch.algorithms.fp8_quant.save_load import (
+        cur_accelerator,
+        local_rank,
+        split_weights,
+        world_size,
+    )
 
-        params_dict = {
-            "model": model,
-            "state_dict": state_dict,
-            "start_prefix": "",
-            "expected_keys": self.loaded_state_dict_keys,
-            "device_map": {"": self.device},
-            "offload_folder": offload_folder,
-            "state_dict_folder": tempfile.mkdtemp() if offload_state_dict else None,
-            "state_dict_index": {} if offload_state_dict else None,
-            "dtype": torch_dtype,
-            "keep_in_fp32_modules": [],
-        }
+    rank_state_dict = {}
+    for name, param in model.named_parameters():
+        if name in gathered_state_dict:
+            full_weight = gathered_state_dict[name]
+            if len(param.shape) != 0 and full_weight.shape != param.shape:
+                if full_weight.shape[0] != param.shape[0]:
+                    split_weight = split_weights(full_weight, world_size, local_rank, split_axis=0).clone()
+                elif full_weight.shape[1] != param.shape[1]:
+                    split_weight = split_weights(full_weight, world_size, local_rank, split_axis=1).clone()
+                else:
+                    split_weight = split_weights(full_weight, world_size, local_rank, split_axis=0).clone()
+            else:
+                split_weight = full_weight
+            rank_state_dict[name] = split_weight
+        cur_accelerator.synchronize()
 
-        _load_state_dict_into_meta_model(**params_dict)
-
-    # make sure token embedding weights are still tied if needed
-    model.tie_weights()
-
-    # Set model in evaluation mode to deactivate DropOut modules by default
-    model.eval()
-
-    return model
+    return rank_state_dict

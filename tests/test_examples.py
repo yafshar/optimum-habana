@@ -50,6 +50,7 @@ from .utils import (
     MODELS_TO_TEST_FOR_SEQUENCE_CLASSIFICATION,
     MODELS_TO_TEST_FOR_SPEECH_RECOGNITION,
     MODELS_TO_TEST_MAPPING,
+    OH_DEVICE_CONTEXT,
 )
 
 
@@ -60,7 +61,7 @@ ACCURACY_PERF_FACTOR = 0.99
 TIME_PERF_FACTOR = 1.05
 
 
-IS_GAUDI2 = os.environ.get("GAUDI2_CI", "0") == "1"
+IS_GAUDI2 = bool("gaudi2" == OH_DEVICE_CONTEXT)
 
 
 def _get_supported_models_for_script(
@@ -205,7 +206,7 @@ _SCRIPT_TO_MODEL_MAPPING = {
     "run_image2text_lora_finetune": _get_supported_models_for_script(
         MODELS_TO_TEST_MAPPING,
         MODEL_FOR_VISION_2_SEQ_MAPPING,
-        ["idefics2", "mllama"],
+        ["idefics2", "mllama", "llava"],
     ),
 }
 
@@ -439,7 +440,7 @@ class ExampleTestMeta(type):
                     # Assess accuracy
                     with open(Path(tmp_dir) / "accuracy_metrics.json") as fp:
                         results = json.load(fp)
-                        baseline = 0.43 if os.environ.get("GAUDI2_CI", "0") == "1" else 0.42
+                        baseline = 0.43 if IS_GAUDI2 else 0.42
                         self.assertGreaterEqual(results["accuracy"], baseline)
                 return
             elif self.EXAMPLE_NAME == "run_clip":
@@ -514,10 +515,12 @@ class ExampleTestMeta(type):
                     extra_command_line_arguments.remove("--use_hpu_graphs_for_inference")
             if os.environ.get("DATA_CACHE", None) is not None and self.EXAMPLE_NAME == "run_clip":
                 extra_command_line_arguments[0] = "--data_dir {}".format(os.environ["DATA_CACHE"])
-            elif torch_compile and (
+
+            if torch_compile and (
                 model_name == "bert-large-uncased-whole-word-masking"
                 or model_name == "roberta-large"
                 or model_name == "albert-xxlarge-v1"
+                or model_name == "./clip-roberta"
             ):
                 extra_command_line_arguments.append("--torch_compile_backend hpu_backend")
                 extra_command_line_arguments.append("--torch_compile")
@@ -527,6 +530,41 @@ class ExampleTestMeta(type):
                     extra_command_line_arguments.remove("--use_hpu_graphs_for_inference")
                 env_variables["PT_HPU_LAZY_MODE"] = "0"
                 env_variables["PT_ENABLE_INT64_SUPPORT"] = "1"
+
+            if self.EXAMPLE_NAME == "run_audio_classification":
+                extra_command_line_arguments.append("--sdp_on_bf16")
+                if "wav2vec2" in model_name:
+                    extra_command_line_arguments.append("--attn_implementation sdpa")
+
+            if self.EXAMPLE_NAME == "run_image_classification":
+                extra_command_line_arguments.append("--sdp_on_bf16")
+
+            if self.EXAMPLE_NAME == "run_glue":
+                if model_name == "bert-large-uncased-whole-word-masking":
+                    extra_command_line_arguments.append("--sdp_on_bf16")
+
+            if self.EXAMPLE_NAME == "run_qa":
+                if model_name == "bert-large-uncased-whole-word-masking" or model_name == "albert-large-v2":
+                    extra_command_line_arguments.append("--sdp_on_bf16")
+
+            if self.EXAMPLE_NAME == "run_bridgetower":
+                if model_name == "BridgeTower/bridgetower-large-itm-mlm-itc":
+                    extra_command_line_arguments.append("--sdp_on_bf16")
+
+            if self.EXAMPLE_NAME == "run_speech_recognition_seq2seq":
+                if model_name == "openai/whisper-small":
+                    extra_command_line_arguments.append("--sdp_on_bf16")
+
+            if self.EXAMPLE_NAME == "run_speech_recognition_ctc":
+                if "wav2vec2" in model_name:
+                    extra_command_line_arguments.append("--sdp_on_bf16")
+                    extra_command_line_arguments.append("--attn_implementation sdpa")
+
+            if self.EXAMPLE_NAME == "run_clip":
+                extra_command_line_arguments.append("--sdp_on_bf16")
+
+            if self.EXAMPLE_NAME == "run_image2text_lora_finetune":
+                extra_command_line_arguments.append("--sdp_on_bf16")
 
             with TemporaryDirectory() as tmp_dir:
                 cmd_line = self._create_command_line(
@@ -659,7 +697,7 @@ class ExampleTesterBase(TestCase):
                 "--save_strategy no",
             ]
 
-        if "compile" in task:
+        if "compile" in task or "--torch_compile" in extra_command_line_arguments:
             cmd_line += ["--use_lazy_mode False"]
         elif self.EXAMPLE_NAME not in ["dpo", "ppo", "reward_modeling"]:
             cmd_line += ["--use_lazy_mode"]
@@ -849,7 +887,7 @@ class MultiCardSeq2SeqQuestionAnsweringExampleTester(
 
 
 class MultiCardVisionLanguageExampleTester(
-    ExampleTesterBase, metaclass=ExampleTestMeta, example_name="run_clip", multi_card=True
+    ExampleTesterBase, metaclass=ExampleTestMeta, example_name="run_clip", multi_card=True, torch_compile=True
 ):
     TASK_NAME = "ydshieh/coco_dataset_script"
 
