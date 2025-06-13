@@ -31,7 +31,8 @@ class ContextParallelLossFunction(torch.autograd.Function):
         return loss_all
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, *grad_outputs):
+        grad_output = grad_outputs[0]
         step_seqlen = ctx.seqlen // get_sequence_parallel_world_size()
         sp_rank = get_sequence_parallel_rank()
         # Extract the relevant part of the gradient for this rank
