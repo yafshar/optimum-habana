@@ -2498,7 +2498,9 @@ class GaudiGenerationMixin(GenerationMixin):
             and bucket_internal
         ):
             # Clear HPU graphs input tensors of the decode phase after the full generation while loop
-            self.clear_inputs()
+            if hasattr(self, "clear_inputs"):
+                self.clear_inputs()
+
             # Delete past key value tensors
             self._remove_past_key_values(model_kwargs)
 
@@ -2856,10 +2858,11 @@ class GaudiGenerationMixin(GenerationMixin):
         ):
             # Clear HPU graphs cache
             if model_kwargs.get("clear_hpu_graphs_cache", False):
-                self.clear_cache()
+                if hasattr(self, "clear_cache"):
+                    self.clear_cache()
 
             # Clear HPU graphs input tensors of the decode phase after the full generation while loop
-            else:
+            elif hasattr(self, "clear_inputs"):
                 self.clear_inputs()
 
             # Delete past key value tensors
@@ -3404,7 +3407,9 @@ class GaudiGenerationMixin(GenerationMixin):
             and bucket_internal
         ):
             # Clear HPU graphs input tensors of the decode phase after the full generation while loop
-            self.clear_inputs()
+            if hasattr(self, "clear_inputs"):
+                self.clear_inputs()
+
             # Delete past key value tensors
             self._remove_past_key_values(model_kwargs)
 
