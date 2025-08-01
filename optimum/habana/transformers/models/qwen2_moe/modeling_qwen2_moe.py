@@ -37,7 +37,6 @@ from transformers.models.qwen2_moe.modeling_qwen2_moe import (
     Qwen2MoeMLP,
     Qwen2MoeModel,
     Qwen2MoeRMSNorm,
-    Qwen2MoeSparseMoeBlock,
     apply_rotary_pos_emb,
     load_balancing_loss_func,
 )
@@ -613,7 +612,7 @@ class GaudiQwen2MoeDecoderLayer(Qwen2MoeDecoderLayer):
         self.self_attn = GaudiQwen2MoeAttention(config=config, layer_idx=layer_idx)
 
         if config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0:
-            self.mlp = Qwen2MoeSparseMoeBlock(config)
+            self.mlp = GaudiQwen2MoeSparseMoeBlock(config)
         else:
             self.mlp = GaudiQwen2MoeMLP(config, intermediate_size=config.intermediate_size)
 
