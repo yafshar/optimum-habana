@@ -161,6 +161,7 @@ from .models import (
     GaudiQwen2MoeForCausalLM,
     GaudiQwen2MoeMLP,
     GaudiQwen2MoeModel,
+    GaudiQwen2MoeSparseMoeBlock,
     GaudiQwen2VisionTransformerPretrainedModel,
     GaudiQwen2VLDecoderLayer,
     GaudiQwen2VLForConditionalGeneration,
@@ -275,7 +276,6 @@ from .models import (
     gaudi_owlvitclasspredictionhead_forward,
     gaudi_persimmon_model_forward,
     gaudi_qwen2_rmsnorm_forward,
-    gaudi_qwen2moe_block_sparse_moe_forward,
     gaudi_qwen2moe_rmsnorm_forward,
     gaudi_qwen3_rmsnorm_forward,
     gaudi_qwen3moe_rmsnorm_forward,
@@ -709,9 +709,7 @@ def adapt_transformers_to_gaudi():
     transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeModel = GaudiQwen2MoeModel
     transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeForCausalLM = GaudiQwen2MoeForCausalLM
     transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeRMSNorm.forward = gaudi_qwen2moe_rmsnorm_forward
-    transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeSparseMoeBlock.forward = (
-        gaudi_qwen2moe_block_sparse_moe_forward
-    )
+    transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeSparseMoeBlock = GaudiQwen2MoeSparseMoeBlock
 
     # Optimization for qwen2-vl Gaudi
     transformers.models.qwen2_vl.modeling_qwen2_vl.VisionSdpaAttention = GaudiVisionSdpaAttention
