@@ -543,11 +543,6 @@ class GaudiQwen2MoeSparseMoeBlock(torch.nn.Module):
         self.shared_expert = GaudiQwen2MoeMLP(config, intermediate_size=config.shared_expert_intermediate_size)
         self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
 
-        experts_range = range(self.num_experts)
-        self.w1_list = [self.experts[i].gate_proj.weight for i in experts_range]
-        self.w2_list = [self.experts[i].down_proj.weight for i in experts_range]
-        self.w3_list = [self.experts[i].up_proj.weight for i in experts_range]
-
     @lru_cache(None)
     def _is_deepspeed_initialized(self) -> bool:
         if not is_deepspeed_available():
@@ -575,19 +570,24 @@ class GaudiQwen2MoeSparseMoeBlock(torch.nn.Module):
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
 
+        experts_range = range(self.num_experts)
+        w1_list = [self.experts[i].gate_proj.weight for i in experts_range]
+        w2_list = [self.experts[i].down_proj.weight for i in experts_range]
+        w3_list = [self.experts[i].up_proj.weight for i in experts_range]
+
         final_hidden_states = torch.ops.hpu.mixture_of_experts(
             hidden_states=hidden_states,
             expert_routing_table=selected_experts,
             router_weights=routing_weights,
-            w1=self.w1_list,
-            w2=self.w3_list,  # Note that there is a different naming convention of w1, w2, and w3 between optimum habana's mixtral model and dynamic MoE kernel.
-            w3=self.w2_list,
+            w1=w1_list,
+            w2=w3_list,  # Note that there is a different naming convention of w1, w2, and w3 between optimum habana's mixtral model and dynamic MoE kernel.
+            w3=w2_list,
             permuted_weights=True,
             activation="silu",
             experts_min=0,
             experts_max=(self.num_experts - 1),
         )
-        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        final_hidden_states = final_hidden_states.reshape(-1, sequence_length, hidden_dim)
 
         if not self.training and self._is_deepspeed_initialized():
             from deepspeed import comm as dist
@@ -597,7 +597,7 @@ class GaudiQwen2MoeSparseMoeBlock(torch.nn.Module):
         shared_expert_output = self.shared_expert(hidden_states)
         shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
 
-        shared_expert_output = shared_expert_output.reshape(batch_size, sequence_length, hidden_dim)
+        shared_expert_output = shared_expert_output.reshape(-1, sequence_length, hidden_dim)
 
         final_hidden_states = final_hidden_states + shared_expert_output
 
